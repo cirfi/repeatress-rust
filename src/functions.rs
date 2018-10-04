@@ -57,7 +57,7 @@ impl<'a> Bot<'a> {
                 };
 
                 match command {
-                    "/status" => self.handle_under_developing(message, handle),
+                    "/status" => self.handle_get_status(message, handle),
                     "/timeout" => self.handle_set_timeout(message, full_command_split.next(), handle),
                     "/threshold" => self.handle_set_threshold(message, full_command_split.next(), handle),
                     "/timezone" => self.handle_under_developing(message, handle),
@@ -76,6 +76,29 @@ impl<'a> Bot<'a> {
 
     fn handle_under_developing(self: &Self, message: Message, _handle: &Handle) {
         self.api.spawn(message.chat.text("项目重构中，该功能尚未完成。"));
+    }
+
+    fn handle_get_status(self: &Self, message: Message, handle: &Handle) {
+        let conf = match self.get_config(&message.chat, handle) {
+            Some(config) => config,
+            None => return,
+        };
+
+        let chat_id = conf.chat_id.clone();
+
+        let keys: Vec<String> = self.redis.keys(chat_id.to_string() + "_*").unwrap();
+
+        let cache_size = keys.len();
+
+        let mut vars = HashMap::new();
+        vars.insert("cache".to_string(), cache_size.to_string());
+        vars.insert("timeout".to_string(), conf.timeout.to_string());
+        vars.insert("threshold".to_string(), conf.threshold.to_string());
+
+        let lang = conf.lang.as_str();
+        let template = get_template(lang).status.to_string();
+
+        self.api.spawn(message.text_reply(strfmt(&template, &vars).unwrap()));
     }
 
     fn handle_set_timeout(self: &'_ mut Self, message: Message, timeout: Option<&str>, handle: &Handle) {
@@ -138,7 +161,13 @@ impl<'a> Bot<'a> {
 
             self.config_map.insert(chat_id, new_conf);
 
-            self.api.spawn(message.text_reply(format!("The threshold is set to {}", threshold)));
+            let lang = conf.lang.as_str();
+            let template = get_template(lang).threshold.to_string();
+
+            let mut vars = HashMap::new();
+            vars.insert("threshold".to_string(), threshold.to_string());
+
+            self.api.spawn(message.text_reply(strfmt(&template, &vars).unwrap()));
         }
     }
 
@@ -173,40 +202,9 @@ impl<'a> Bot<'a> {
     }
 
     fn get_config(self: &Self, chat: &MessageChat, _handle: &Handle) -> Option<Config> {
-        let cid: i64;
-        let cname: &str;
-        let username: &str;
+        let chat_status = self.get_chat_info(chat);
 
-        match chat {
-            MessageChat::Private(user) => {
-                cid = user.id.into();
-                cname = user.first_name.as_str();
-                username = match &user.username {
-                    Some(name) => name.as_str(),
-                    None => "",
-                }
-            },
-            MessageChat::Group(group) => {
-                cid = group.id.into();
-                cname = group.title.as_str();
-                username =  "";
-            },
-            MessageChat::Supergroup(group) => {
-                cid = group.id.into();
-                cname = group.title.as_str();
-                username = match &group.username {
-                    Some(name) => name.as_str(),
-                    None => "",
-                }
-            },
-            _ => {
-                cid = 0;
-                cname = "";
-                username = "";
-            }
-        }
-
-        let key = ChatId::new(cid);
+        let key = ChatId::new(chat_status.chat_id);
 
         if self.config_map.contains_key(&key) {
             let result = match self.config_map.get(&key) {
@@ -215,29 +213,39 @@ impl<'a> Bot<'a> {
             };
 
             return result;
-        } else if cid != 0 {
-            use schema::config::dsl::*;
+        } else if chat_status.chat_id != 0 {
+            let conf = self.save_config(chat_status);
 
-            let temp = NewConfig {
-                chat_id: &cid,
-                chat_name: cname,
-                chat_username: username,
-                ..Default::default()
-            };
-
-            let result: Config = diesel::insert_into(config)
-                .values(&temp)
-                .on_conflict_do_nothing()
-                .get_result(self.pg)
-                .expect("Error saving new config");
-
-            return Some(result);
+            return Some(conf);
         }
 
         None
     }
 
     fn get_config_mut(self: &'_ mut Self, chat: &MessageChat, _handle: &Handle) -> Option<Config> {
+        let chat_status = self.get_chat_info(chat);
+
+        let key = ChatId::new(chat_status.chat_id);
+
+        let result = if self.config_map.contains_key(&key) {
+            match self.config_map.get(&key) {
+                Some(conf) => Some(conf.clone()),
+                None => None,
+            }
+        } else if chat_status.chat_id != 0 {
+            let conf = self.save_config(chat_status);
+
+            self.config_map.insert(key, conf.clone());
+
+            return Some(conf);
+        } else {
+            None
+        };
+
+        result
+    }
+
+    fn get_chat_info(self: &Self, chat: &MessageChat) -> ChatStatus {
         let cid: i64;
         let cname: &str;
         let username: &str;
@@ -271,37 +279,30 @@ impl<'a> Bot<'a> {
             }
         }
 
-        let key = ChatId::new(cid);
+        ChatStatus { chat_id: cid, chat_name: cname.to_string(), chat_username: username.to_string() }
+    }
 
-        let result = if self.config_map.contains_key(&key) {
-            match self.config_map.get(&key) {
-                Some(conf) => Some(conf.clone()),
-                None => None,
-            }
-        } else if cid != 0 {
-            use schema::config::dsl::*;
+    fn save_config(self: &Self, chat_status: ChatStatus) -> Config {
+        use schema::config::dsl::*;
 
-            let temp = NewConfig {
-                chat_id: &cid,
-                chat_name: cname,
-                chat_username: username,
-                ..Default::default()
-            };
-
-            let result: Config = diesel::insert_into(config)
-                .values(&temp)
-                .on_conflict_do_nothing()
-                .get_result(self.pg)
-                .expect("Error saving new config");
-
-            self.config_map.insert(key, result.clone());
-
-            return Some(result);
-        } else {
-            None
+        let temp = NewConfig {
+            chat_id: &chat_status.chat_id,
+            chat_name: chat_status.chat_name.as_str(),
+            chat_username: chat_status.chat_username.as_str(),
+            ..Default::default()
         };
 
-        result
+        let _ = diesel::insert_into(config)
+            .values(&temp)
+            .on_conflict_do_nothing()
+            .execute(self.pg);
+
+        let result = config
+            .filter(chat_id.eq(chat_status.chat_id))
+            .load::<Config>(self.pg)
+            .expect("Error loading config");
+
+        result.first().unwrap().clone()
     }
 
     // filter commands that @ another bot
