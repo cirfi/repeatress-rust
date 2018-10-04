@@ -9,7 +9,7 @@ diesel = { version = "1.3.3", features = ["postgres", "chrono"] }
 # redis
 redis = "0.9.1"
 # telegram bot api
-telegram-bot = "0.6.1"
+telegram-bot = { git = "https://github.com/telegram-rs/telegram-bot" }
 # telebot = {version = "0.2.10", path = "./telebot"}
 # natural language detection
 whatlang = "0.5.0"
