@@ -9,7 +9,7 @@ use redis::Commands;
 use diesel;
 use diesel::prelude::*;
 use telegram_bot::prelude::*;
-use telegram_bot::{Message, MessageKind};
+use telegram_bot::{Message, Error, MessageKind};
 use telegram_bot::types::*;
 
 use super::Bot;
@@ -20,10 +20,20 @@ impl<'a> Bot<'a> {
     pub fn run(self: &'a mut Self, core: &mut Core) {
         let handle = core.handle();
 
-        let future = self.api.stream().for_each(|update| {
-            if let UpdateKind::Message(message) = update.kind {
-                self.handle_message(message, &handle)
+        let stream = self.api.stream().then(|mb_update| {
+            let res: Result<Result<Update, Error>, ()> = Ok(mb_update);
+            res
+        });
+
+        let future = stream.for_each(|mb_update| {
+            if let Ok(update) = mb_update {
+                if let UpdateKind::Message(message) = update.kind {
+                    self.handle_message(message, &handle)
+                }
+            } else {
+                println!("{:#?}", mb_update);
             }
+
             Ok(())
         });
 
