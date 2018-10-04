@@ -1,0 +1,4 @@
+/target
+**/*.rs.bk
+.env
+migrations/00000000000000_diesel_initial_setup
